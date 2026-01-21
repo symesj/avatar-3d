@@ -1,10 +1,10 @@
 "use client";
 
-import { useState, useCallback, useReducer } from "react";
+import { useState, useEffect, useTransition } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import {
-  getSavedRenders,
+  refreshRenderCache,
   deleteRender,
   clearAllRenders,
   type SavedRender,
@@ -16,41 +16,41 @@ interface RenderHistoryProps {
   refreshTrigger?: number;
 }
 
-// Custom hook to get renders with force update capability
-function useRenders(refreshTrigger?: number) {
-  // Use reducer to force re-renders
-  const [, forceUpdate] = useReducer((x) => x + 1, 0);
-
-  // Read directly from localStorage on each render
-  // This is safe because it's a synchronous read during render
-  const renders = typeof window !== "undefined" ? getSavedRenders() : [];
-
-  // Force re-render when refreshTrigger changes (tracked via closure)
-  void refreshTrigger;
-
-  return { renders, forceUpdate };
-}
-
 export function RenderHistory({ onLoadRender, refreshTrigger }: RenderHistoryProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const { renders, forceUpdate } = useRenders(refreshTrigger);
+  const [renders, setRenders] = useState<SavedRender[]>([]);
+  const [, startTransition] = useTransition();
 
-  const refresh = useCallback(() => {
-    forceUpdate();
-  }, [forceUpdate]);
+  // Load renders from IndexedDB
+  useEffect(() => {
+    let mounted = true;
+
+    const load = async () => {
+      const data = await refreshRenderCache();
+      if (mounted) {
+        startTransition(() => {
+          setRenders(data);
+        });
+      }
+    };
+
+    load();
+    return () => { mounted = false; };
+  }, [refreshTrigger]);
 
   const handleDelete = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     deleteRender(id);
-    refresh();
+    // Update local state immediately
+    setRenders((prev) => prev.filter((r) => r.id !== id));
     if (selectedId === id) setSelectedId(null);
   };
 
   const handleClearAll = () => {
     if (confirm("Delete all saved renders? This cannot be undone.")) {
       clearAllRenders();
-      refresh();
+      setRenders([]);
       setSelectedId(null);
     }
   };

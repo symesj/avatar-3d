@@ -1,11 +1,11 @@
 /**
- * Local storage utilities for persisting user data
+ * IndexedDB storage for persisting user data
+ * Uses IndexedDB instead of localStorage for larger storage capacity (50MB+)
  */
 
-const STORAGE_KEYS = {
-  RENDERS: "avatar3d_renders",
-  SETTINGS: "avatar3d_settings",
-} as const;
+const DB_NAME = "avatar3d";
+const DB_VERSION = 1;
+const STORE_NAME = "renders";
 
 export interface SavedRender {
   id: string;
@@ -13,12 +13,13 @@ export interface SavedRender {
   mode: "cursor" | "3d-model";
   originalImageBase64: string;
   processedImageBase64: string;
-  previewThumbnail: string; // Smaller thumbnail for gallery
+  previewThumbnail: string;
+  glbBase64?: string; // Now stored in IndexedDB
+  generatedFrames?: string[]; // Base64 frames for cursor mode
   frameCount?: number;
   xSteps?: number;
   ySteps?: number;
   stylePrompt?: string;
-  // Note: GLB not stored - too large for localStorage
 }
 
 export interface UserSettings {
@@ -29,8 +30,33 @@ export interface UserSettings {
   defaultMeshQuality: number;
 }
 
-const MAX_RENDERS = 10; // Reduced to save localStorage space
-const THUMBNAIL_SIZE = 200; // Slightly larger for better quality
+const MAX_RENDERS = 10;
+const THUMBNAIL_SIZE = 200;
+
+/**
+ * Open the IndexedDB database
+ */
+function openDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (typeof window === "undefined") {
+      reject(new Error("IndexedDB not available"));
+      return;
+    }
+
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+
+    request.onupgradeneeded = (event) => {
+      const db = (event.target as IDBOpenDBRequest).result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        const store = db.createObjectStore(STORE_NAME, { keyPath: "id" });
+        store.createIndex("createdAt", "createdAt", { unique: false });
+      }
+    };
+  });
+}
 
 /**
  * Generate a unique ID
@@ -53,7 +79,6 @@ export async function createThumbnail(base64: string): Promise<string> {
         return;
       }
 
-      // Calculate dimensions maintaining aspect ratio
       const ratio = Math.min(THUMBNAIL_SIZE / img.width, THUMBNAIL_SIZE / img.height);
       const width = img.width * ratio;
       const height = img.height * ratio;
@@ -62,7 +87,7 @@ export async function createThumbnail(base64: string): Promise<string> {
       canvas.height = height;
       ctx.drawImage(img, 0, 0, width, height);
 
-      resolve(canvas.toDataURL("image/jpeg", 0.7));
+      resolve(canvas.toDataURL("image/jpeg", 0.8));
     };
     img.onerror = () => resolve(base64);
     img.src = base64.startsWith("data:") ? base64 : `data:image/png;base64,${base64}`;
@@ -70,28 +95,64 @@ export async function createThumbnail(base64: string): Promise<string> {
 }
 
 /**
- * Get all saved renders from local storage
+ * Get all saved renders from IndexedDB
  */
-export function getSavedRenders(): SavedRender[] {
-  if (typeof window === "undefined") return [];
-
+export async function getSavedRendersAsync(): Promise<SavedRender[]> {
   try {
-    const data = localStorage.getItem(STORAGE_KEYS.RENDERS);
-    if (!data) return [];
-    return JSON.parse(data) as SavedRender[];
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_NAME, "readonly");
+      const store = transaction.objectStore(STORE_NAME);
+      const request = store.getAll();
+
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const renders = request.result as SavedRender[];
+        // Sort by createdAt descending (newest first)
+        renders.sort((a, b) => b.createdAt - a.createdAt);
+        resolve(renders);
+      };
+    });
   } catch {
     return [];
   }
 }
 
 /**
- * Save a new render to local storage
+ * Synchronous version for initial render (returns cached or empty)
+ */
+let cachedRenders: SavedRender[] = [];
+let cacheLoaded = false;
+
+export function getSavedRenders(): SavedRender[] {
+  if (typeof window === "undefined") return [];
+
+  // Load async in background if not loaded
+  if (!cacheLoaded) {
+    getSavedRendersAsync().then((renders) => {
+      cachedRenders = renders;
+      cacheLoaded = true;
+    });
+  }
+
+  return cachedRenders;
+}
+
+/**
+ * Refresh the cache
+ */
+export async function refreshRenderCache(): Promise<SavedRender[]> {
+  cachedRenders = await getSavedRendersAsync();
+  cacheLoaded = true;
+  return cachedRenders;
+}
+
+/**
+ * Save a new render to IndexedDB
  */
 export async function saveRender(
   render: Omit<SavedRender, "id" | "createdAt" | "previewThumbnail">
 ): Promise<SavedRender> {
-  const renders = getSavedRenders();
-
   const thumbnail = await createThumbnail(render.processedImageBase64);
 
   const newRender: SavedRender = {
@@ -101,38 +162,86 @@ export async function saveRender(
     previewThumbnail: thumbnail,
   };
 
-  // Add to beginning, limit total count
-  const updatedRenders = [newRender, ...renders].slice(0, MAX_RENDERS);
+  try {
+    const db = await openDB();
 
-  localStorage.setItem(STORAGE_KEYS.RENDERS, JSON.stringify(updatedRenders));
+    // Get current renders to enforce limit
+    const currentRenders = await getSavedRendersAsync();
 
-  return newRender;
+    // If at limit, delete oldest
+    if (currentRenders.length >= MAX_RENDERS) {
+      const oldestId = currentRenders[currentRenders.length - 1].id;
+      await deleteRenderAsync(oldestId);
+    }
+
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_NAME, "readwrite");
+      const store = transaction.objectStore(STORE_NAME);
+      const request = store.add(newRender);
+
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        // Update cache
+        cachedRenders = [newRender, ...cachedRenders.filter(r => r.id !== newRender.id)].slice(0, MAX_RENDERS);
+        resolve(newRender);
+      };
+    });
+  } catch (err) {
+    console.error("Failed to save render:", err);
+    throw err;
+  }
 }
 
 /**
- * Delete a render from local storage
+ * Delete a render from IndexedDB
+ */
+async function deleteRenderAsync(id: string): Promise<void> {
+  try {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_NAME, "readwrite");
+      const store = transaction.objectStore(STORE_NAME);
+      const request = store.delete(id);
+
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve();
+    });
+  } catch (err) {
+    console.error("Failed to delete render:", err);
+  }
+}
+
+/**
+ * Delete a render (updates cache)
  */
 export function deleteRender(id: string): void {
-  const renders = getSavedRenders();
-  const filtered = renders.filter((r) => r.id !== id);
-  localStorage.setItem(STORAGE_KEYS.RENDERS, JSON.stringify(filtered));
+  deleteRenderAsync(id).then(() => {
+    cachedRenders = cachedRenders.filter((r) => r.id !== id);
+  });
 }
 
 /**
- * Clear all renders from local storage
+ * Clear all renders from IndexedDB
  */
 export function clearAllRenders(): void {
-  localStorage.removeItem(STORAGE_KEYS.RENDERS);
+  if (typeof window === "undefined") return;
+
+  openDB().then((db) => {
+    const transaction = db.transaction(STORE_NAME, "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    store.clear();
+    cachedRenders = [];
+  }).catch(console.error);
 }
 
 /**
- * Get user settings
+ * Get user settings from localStorage (small data, localStorage is fine)
  */
 export function getUserSettings(): UserSettings | null {
   if (typeof window === "undefined") return null;
 
   try {
-    const data = localStorage.getItem(STORAGE_KEYS.SETTINGS);
+    const data = localStorage.getItem("avatar3d_settings");
     if (!data) return null;
     return JSON.parse(data) as UserSettings;
   } catch {
@@ -144,7 +253,7 @@ export function getUserSettings(): UserSettings | null {
  * Save user settings
  */
 export function saveUserSettings(settings: UserSettings): void {
-  localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(settings));
+  localStorage.setItem("avatar3d_settings", JSON.stringify(settings));
 }
 
 /**
@@ -156,7 +265,6 @@ const imageCache = new Map<string, string>();
  * Generate a cache key from image content
  */
 async function hashImage(base64: string): Promise<string> {
-  // Simple hash using first/last chunks + length
   const sample = base64.slice(0, 100) + base64.slice(-100) + base64.length;
   return btoa(sample).slice(0, 32);
 }
@@ -185,7 +293,6 @@ export async function cachePreprocessed(
   const key = await hashImage(originalBase64 + stylePrompt + fullBody);
   imageCache.set(key, processedBase64);
 
-  // Limit cache size
   if (imageCache.size > 10) {
     const firstKey = imageCache.keys().next().value;
     if (firstKey) imageCache.delete(firstKey);

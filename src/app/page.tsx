@@ -64,17 +64,37 @@ export default function Home() {
     setPreviewUrl(`data:image/png;base64,${render.processedImageBase64}`);
     setGenerationMode(render.mode);
     setStylePrompt(render.stylePrompt || "");
-    setGlbBase64(null);
-    setGeneratedImages([]);
 
-    if (render.mode === "cursor" && render.xSteps && render.ySteps) {
+    if (render.mode === "3d-model" && render.glbBase64) {
+      // Load 3D model directly
+      setGlbBase64(render.glbBase64);
+      setGeneratedImages([]);
+      setStatus("complete");
+      toast.success("3D model loaded");
+    } else if (render.mode === "cursor" && render.generatedFrames && render.xSteps && render.ySteps) {
+      // Load cursor frames directly
       setXSteps(render.xSteps);
       setYSteps(render.ySteps);
+      setGlbBase64(null);
+      const images: GeneratedImage[] = render.generatedFrames.map((frame, index) => ({
+        imageBase64: frame,
+        index,
+        step: { filename: `frame-${index}`, rotate_yaw: 0, rotate_pitch: 0, pupil_x: 0, pupil_y: 0, crop_factor: 1.7, output_quality: 100, src_ratio: 1, sample_ratio: 1 },
+      }));
+      setGeneratedImages(images);
+      setStatus("complete");
+      toast.success("Render loaded");
+    } else {
+      // Fallback: load preview, user needs to regenerate
+      setGlbBase64(null);
+      setGeneratedImages([]);
+      if (render.mode === "cursor" && render.xSteps && render.ySteps) {
+        setXSteps(render.xSteps);
+        setYSteps(render.ySteps);
+      }
+      setStatus("idle");
+      toast.success("Image loaded - click Generate to recreate");
     }
-
-    // Reset to idle - user can regenerate from the loaded preprocessed image
-    setStatus("idle");
-    toast.success("Image loaded - click Generate to recreate");
   }, []);
 
   const handleGenerate = useCallback(async () => {
@@ -159,12 +179,12 @@ export default function Home() {
         setStatus("complete");
         toast.success("3D model ready!", { id: toastId });
 
-        // Save to history (don't store GLB - too large for localStorage)
+        // Save to history (IndexedDB can handle large GLB files)
         await saveRender({
           mode: "3d-model",
           originalImageBase64,
           processedImageBase64: imageToUse,
-          // glbBase64 omitted to save localStorage space
+          glbBase64: data.glbBase64,
           stylePrompt: stylePrompt.trim() || undefined,
         });
         setHistoryRefresh((n) => n + 1);
@@ -229,11 +249,12 @@ export default function Home() {
                 setProgress(100);
                 toast.success(`${images.length} frames generated`, { id: toastId });
 
-                // Save to history
+                // Save to history with all frames (IndexedDB can handle it)
                 await saveRender({
                   mode: "cursor",
                   originalImageBase64,
                   processedImageBase64: imageToUse,
+                  generatedFrames: images.map((img) => img.imageBase64),
                   frameCount: images.length,
                   xSteps,
                   ySteps,
