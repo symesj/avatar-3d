@@ -55,65 +55,65 @@ export async function POST(request: NextRequest): Promise<Response> {
       );
 
       let completedCount = 0;
-      let currentIndex = 0;
 
-      const processNext = async (): Promise<void> => {
-        while (currentIndex < flatSteps.length) {
-          const myIndex = currentIndex++;
-          const step = flatSteps[myIndex];
-          let retries = 0;
+      // Process a single image with retries
+      const processImage = async (index: number): Promise<void> => {
+        const step = flatSteps[index];
+        let retries = 0;
 
-          while (retries < MAX_RETRIES) {
-            try {
-              const imageBuffer = await generateImage({
-                imageBase64,
-                rotate_yaw: step.rotate_yaw,
-                rotate_pitch: step.rotate_pitch,
-                pupil_x: step.pupil_x,
-                pupil_y: step.pupil_y,
-                crop_factor: step.crop_factor,
-                output_quality: step.output_quality,
-                src_ratio: step.src_ratio,
-                sample_ratio: step.sample_ratio,
-              });
+        while (retries < MAX_RETRIES) {
+          try {
+            const imageBuffer = await generateImage({
+              imageBase64,
+              rotate_yaw: step.rotate_yaw,
+              rotate_pitch: step.rotate_pitch,
+              pupil_x: step.pupil_x,
+              pupil_y: step.pupil_y,
+              crop_factor: step.crop_factor,
+              output_quality: step.output_quality,
+              src_ratio: step.src_ratio,
+              sample_ratio: step.sample_ratio,
+            });
 
-              completedCount++;
-              controller.enqueue(
-                encodeSSE({
-                  type: "progress",
-                  completed: completedCount,
-                  total: totalImages,
-                  index: myIndex,
-                  step,
-                  imageBase64: imageBuffer.toString("base64"),
-                })
+            completedCount++;
+            controller.enqueue(
+              encodeSSE({
+                type: "progress",
+                completed: completedCount,
+                total: totalImages,
+                index,
+                step,
+                imageBase64: imageBuffer.toString("base64"),
+              })
+            );
+            return;
+          } catch (err) {
+            const is429 = err instanceof Error && err.message.includes("429");
+            if (is429 && retries < MAX_RETRIES - 1) {
+              const waitTime = Math.min(
+                INITIAL_BACKOFF_MS * Math.pow(2, retries),
+                60000
               );
-              break;
-            } catch (err) {
-              const is429 = err instanceof Error && err.message.includes("429");
-              if (is429 && retries < MAX_RETRIES - 1) {
-                const waitTime = Math.min(
-                  INITIAL_BACKOFF_MS * Math.pow(2, retries),
-                  60000
-                );
-                await delay(waitTime);
-                retries++;
-              } else {
-                console.error(`[Stream] Error generating image ${myIndex}:`, err);
-                completedCount++;
-                break;
-              }
+              await delay(waitTime);
+              retries++;
+            } else {
+              console.error(`[Stream] Error generating image ${index}:`, err);
+              completedCount++;
+              return;
             }
           }
         }
       };
 
       try {
-        const workers = Array(Math.min(CONCURRENCY, flatSteps.length))
-          .fill(null)
-          .map(() => processNext());
+        // Process in batches to control concurrency
+        for (let i = 0; i < flatSteps.length; i += CONCURRENCY) {
+          const batch = flatSteps
+            .slice(i, i + CONCURRENCY)
+            .map((_, j) => processImage(i + j));
+          await Promise.all(batch);
+        }
 
-        await Promise.all(workers);
         controller.enqueue(encodeSSE({ type: "complete" }));
       } catch (error) {
         controller.enqueue(
