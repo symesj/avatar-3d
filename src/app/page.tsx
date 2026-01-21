@@ -249,13 +249,14 @@ export default function Home() {
                 setProgress(100);
                 toast.success(`${images.length} frames generated`, { id: toastId });
 
-                // Save to history with all frames (IndexedDB can handle it)
+                // Save to history with all frames sorted by index (IndexedDB can handle it)
+                const sortedImages = [...images].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
                 await saveRender({
                   mode: "cursor",
                   originalImageBase64,
                   processedImageBase64: imageToUse,
-                  generatedFrames: images.map((img) => img.imageBase64),
-                  frameCount: images.length,
+                  generatedFrames: sortedImages.map((img) => img.imageBase64),
+                  frameCount: sortedImages.length,
                   xSteps,
                   ySteps,
                   stylePrompt: stylePrompt.trim() || undefined,
