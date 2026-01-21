@@ -14,11 +14,11 @@ export interface SavedRender {
   originalImageBase64: string;
   processedImageBase64: string;
   previewThumbnail: string; // Smaller thumbnail for gallery
-  glbBase64?: string;
   frameCount?: number;
   xSteps?: number;
   ySteps?: number;
   stylePrompt?: string;
+  // Note: GLB not stored - too large for localStorage
 }
 
 export interface UserSettings {
@@ -29,8 +29,8 @@ export interface UserSettings {
   defaultMeshQuality: number;
 }
 
-const MAX_RENDERS = 20;
-const THUMBNAIL_SIZE = 150;
+const MAX_RENDERS = 10; // Reduced to save localStorage space
+const THUMBNAIL_SIZE = 200; // Slightly larger for better quality
 
 /**
  * Generate a unique ID

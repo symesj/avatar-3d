@@ -64,21 +64,17 @@ export default function Home() {
     setPreviewUrl(`data:image/png;base64,${render.processedImageBase64}`);
     setGenerationMode(render.mode);
     setStylePrompt(render.stylePrompt || "");
+    setGlbBase64(null);
+    setGeneratedImages([]);
 
-    if (render.mode === "3d-model" && render.glbBase64) {
-      setGlbBase64(render.glbBase64);
-      setGeneratedImages([]);
-      setStatus("complete");
-    } else if (render.mode === "cursor" && render.xSteps && render.ySteps) {
+    if (render.mode === "cursor" && render.xSteps && render.ySteps) {
       setXSteps(render.xSteps);
       setYSteps(render.ySteps);
-      setGlbBase64(null);
-      // Note: We don't store all frames, just the preview
-      setGeneratedImages([]);
-      setStatus("idle");
     }
 
-    toast.success("Render loaded from history");
+    // Reset to idle - user can regenerate from the loaded preprocessed image
+    setStatus("idle");
+    toast.success("Image loaded - click Generate to recreate");
   }, []);
 
   const handleGenerate = useCallback(async () => {
@@ -163,12 +159,12 @@ export default function Home() {
         setStatus("complete");
         toast.success("3D model ready!", { id: toastId });
 
-        // Save to history
+        // Save to history (don't store GLB - too large for localStorage)
         await saveRender({
           mode: "3d-model",
           originalImageBase64,
           processedImageBase64: imageToUse,
-          glbBase64: data.glbBase64,
+          // glbBase64 omitted to save localStorage space
           stylePrompt: stylePrompt.trim() || undefined,
         });
         setHistoryRefresh((n) => n + 1);
