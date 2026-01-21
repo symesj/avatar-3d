@@ -6,12 +6,19 @@ import { ImageUpload } from "@/components/ImageUpload";
 import { Viewer3D } from "@/components/Viewer3D";
 import { ModelViewer } from "@/components/ModelViewer";
 import { ExportModal } from "@/components/ExportModal";
+import { RenderHistory } from "@/components/RenderHistory";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Slider } from "@/components/ui/slider";
 import { Badge } from "@/components/ui/badge";
 import { calculateCost, DEFAULTS } from "@/lib/constants";
+import {
+  saveRender,
+  getCachedPreprocessed,
+  cachePreprocessed,
+  type SavedRender,
+} from "@/lib/storage";
 import type { GeneratedImage, GenerationStatus, GenerationMode, StreamEvent } from "@/lib/types";
 import { Loader2, Sparkles, Box, MousePointer2, User, Download, Wand2, Pencil, X } from "lucide-react";
 import Image from "next/image";
@@ -36,6 +43,9 @@ export default function Home() {
   const [textureSize, setTextureSize] = useState<number>(DEFAULTS.TEXTURE_SIZE);
   const [meshQuality, setMeshQuality] = useState<number>(DEFAULTS.MESH_QUALITY);
 
+  // History refresh trigger
+  const [historyRefresh, setHistoryRefresh] = useState(0);
+
   const estimatedCost = calculateCost(xSteps, ySteps);
   const totalImages = xSteps * ySteps;
 
@@ -48,6 +58,29 @@ export default function Home() {
     setProgress(0);
   }, []);
 
+  // Load a saved render from history
+  const handleLoadRender = useCallback((render: SavedRender) => {
+    setOriginalImageBase64(render.originalImageBase64);
+    setPreviewUrl(`data:image/png;base64,${render.processedImageBase64}`);
+    setGenerationMode(render.mode);
+    setStylePrompt(render.stylePrompt || "");
+
+    if (render.mode === "3d-model" && render.glbBase64) {
+      setGlbBase64(render.glbBase64);
+      setGeneratedImages([]);
+      setStatus("complete");
+    } else if (render.mode === "cursor" && render.xSteps && render.ySteps) {
+      setXSteps(render.xSteps);
+      setYSteps(render.ySteps);
+      setGlbBase64(null);
+      // Note: We don't store all frames, just the preview
+      setGeneratedImages([]);
+      setStatus("idle");
+    }
+
+    toast.success("Render loaded from history");
+  }, []);
+
   const handleGenerate = useCallback(async () => {
     if (!originalImageBase64) return;
 
@@ -57,38 +90,51 @@ export default function Home() {
     setGlbBase64(null);
 
     const toastId = toast.loading("Creating Pixar-style character...");
+    const fullBody = generationMode === "3d-model";
 
     let imageToUse = originalImageBase64;
 
-    // Step 1: Preprocess with Nano Banana Pro
-    try {
-      const preprocessResponse = await fetch("/api/preprocess", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          imageBase64: originalImageBase64,
-          fullBody: generationMode === "3d-model",
-          stylePrompt: stylePrompt.trim() || undefined,
-        }),
-      });
+    // Check cache first
+    const cached = await getCachedPreprocessed(originalImageBase64, stylePrompt, fullBody);
+    if (cached) {
+      imageToUse = cached;
+      setPreviewUrl(`data:image/png;base64,${cached}`);
+      toast.loading("Using cached character!", { id: toastId });
+    } else {
+      // Step 1: Preprocess with Nano Banana
+      try {
+        const preprocessResponse = await fetch("/api/preprocess", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            imageBase64: originalImageBase64,
+            fullBody,
+            stylePrompt: stylePrompt.trim() || undefined,
+          }),
+        });
 
-      if (preprocessResponse.ok) {
-        const preprocessData = await preprocessResponse.json();
-        imageToUse = preprocessData.imageBase64;
-        setPreviewUrl(`data:image/png;base64,${imageToUse}`);
-        toast.loading("Character ready!", { id: toastId });
-      } else {
-        const errorData = await preprocessResponse.json();
-        throw new Error(errorData.error || "Preprocessing failed");
+        if (preprocessResponse.ok) {
+          const preprocessData = await preprocessResponse.json();
+          imageToUse = preprocessData.imageBase64;
+          setPreviewUrl(`data:image/png;base64,${imageToUse}`);
+
+          // Cache the result
+          await cachePreprocessed(originalImageBase64, stylePrompt, fullBody, imageToUse);
+
+          toast.loading("Character ready!", { id: toastId });
+        } else {
+          const errorData = await preprocessResponse.json();
+          throw new Error(errorData.error || "Preprocessing failed");
+        }
+      } catch (err) {
+        console.error("Preprocessing error:", err);
+        setStatus("error");
+        toast.error("Failed to create character", {
+          id: toastId,
+          description: err instanceof Error ? err.message : "Unknown error"
+        });
+        return;
       }
-    } catch (err) {
-      console.error("Preprocessing error:", err);
-      setStatus("error");
-      toast.error("Failed to create character", {
-        id: toastId,
-        description: err instanceof Error ? err.message : "Unknown error"
-      });
-      return;
     }
 
     // Step 2: Generate based on mode
@@ -116,6 +162,16 @@ export default function Home() {
         setGlbBase64(data.glbBase64);
         setStatus("complete");
         toast.success("3D model ready!", { id: toastId });
+
+        // Save to history
+        await saveRender({
+          mode: "3d-model",
+          originalImageBase64,
+          processedImageBase64: imageToUse,
+          glbBase64: data.glbBase64,
+          stylePrompt: stylePrompt.trim() || undefined,
+        });
+        setHistoryRefresh((n) => n + 1);
       } catch (err) {
         setStatus("error");
         const message = err instanceof Error ? err.message : "An error occurred";
@@ -176,6 +232,18 @@ export default function Home() {
                 setStatus("complete");
                 setProgress(100);
                 toast.success(`${images.length} frames generated`, { id: toastId });
+
+                // Save to history
+                await saveRender({
+                  mode: "cursor",
+                  originalImageBase64,
+                  processedImageBase64: imageToUse,
+                  frameCount: images.length,
+                  xSteps,
+                  ySteps,
+                  stylePrompt: stylePrompt.trim() || undefined,
+                });
+                setHistoryRefresh((n) => n + 1);
               } else if (data.type === "error") {
                 throw new Error(data.error);
               }
@@ -199,7 +267,7 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-background flex items-center justify-center p-4">
-      <div className="w-full max-w-4xl">
+      <div className="w-full max-w-4xl space-y-4">
         {/* Main Content Grid */}
         <div className="grid md:grid-cols-2 gap-4">
           {/* Left Column - Settings */}
@@ -437,6 +505,12 @@ export default function Home() {
             </div>
           </div>
         </div>
+
+        {/* Render History */}
+        <RenderHistory
+          onLoadRender={handleLoadRender}
+          refreshTrigger={historyRefresh}
+        />
       </div>
 
       {/* Style Prompt Modal */}

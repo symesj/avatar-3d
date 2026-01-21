@@ -1,5 +1,7 @@
 # Avatar 3D
 
+[![GitHub stars](https://img.shields.io/github/stars/0xGF/avatar-3d?style=social)](https://github.com/0xGF/avatar-3d)
+
 Generate interactive 3D avatars from a single photo using AI. Choose between cursor-tracking rotation or full 3D model export.
 
 ## Features
