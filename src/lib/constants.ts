@@ -1,61 +1,57 @@
-export const X_STEPS = 10;
-export const Y_STEPS = 10;
-export const ROTATE_BOUND = 20;
-export const PUPIL_BOUND = 15;
-export const FPS = 60;
+import type { Step, GenerateStepsOptions, GenerateStepsResult } from "./types";
 
-function round(value: number, precision = 100) {
+/**
+ * Default configuration values
+ */
+export const DEFAULTS = {
+  X_STEPS: 5,
+  Y_STEPS: 5,
+  ROTATE_BOUND: 20,
+  PUPIL_BOUND: 15,
+  CROP_FACTOR: 1.7,
+  OUTPUT_QUALITY: 100,
+  TEXTURE_SIZE: 1024,
+  MESH_QUALITY: 0.9,
+} as const;
+
+/**
+ * Cost per image generation (in USD)
+ */
+const COST_PER_IMAGE = 0.00098;
+
+/**
+ * Round a number to specified precision
+ */
+function round(value: number, precision = 100): number {
   return Math.round(value * precision) / precision;
 }
 
-export interface Step {
-  filename: string;
-  rotate_yaw: number;
-  rotate_pitch: number;
-  pupil_x: number;
-  pupil_y: number;
-  crop_factor: number;
-  output_quality: number;
-  src_ratio: number;
-  sample_ratio: number;
-}
-
-export interface GenerateStepsOptions {
-  X_STEPS: number;
-  Y_STEPS: number;
-  PREFIX: string;
-  ROTATE_BOUND?: number;
-  PUPIL_BOUND?: number;
-}
-
-export function generateSteps(options: GenerateStepsOptions) {
+/**
+ * Generate step configurations for head rotation grid
+ */
+export function generateSteps(options: GenerateStepsOptions): GenerateStepsResult {
   const {
-    X_STEPS,
-    Y_STEPS,
-    PREFIX,
-    ROTATE_BOUND: rotateBound = ROTATE_BOUND,
-    PUPIL_BOUND: pupilBound = PUPIL_BOUND,
+    xSteps,
+    ySteps,
+    prefix,
+    rotateBound = DEFAULTS.ROTATE_BOUND,
+    pupilBound = DEFAULTS.PUPIL_BOUND,
   } = options;
 
   const steps: Step[][] = [];
 
-  for (let y = 0; y < Y_STEPS; y++) {
+  for (let y = 0; y < ySteps; y++) {
     const row: Step[] = [];
-    for (let x = 0; x < X_STEPS; x++) {
-      const rotate_yaw = round(
-        -rotateBound + (x / (X_STEPS - 1 || 1)) * (rotateBound * 2)
-      );
-      const rotate_pitch = round(
-        -rotateBound + (y / (Y_STEPS - 1 || 1)) * (rotateBound * 2)
-      );
-      const pupil_x = round(
-        -pupilBound + (x / (X_STEPS - 1 || 1)) * (pupilBound * 2)
-      );
-      const pupil_y = round(
-        -pupilBound + (y / (Y_STEPS - 1 || 1)) * (pupilBound * 2)
-      );
+    for (let x = 0; x < xSteps; x++) {
+      const xNorm = xSteps > 1 ? x / (xSteps - 1) : 0.5;
+      const yNorm = ySteps > 1 ? y / (ySteps - 1) : 0.5;
 
-      const filename = `${PREFIX}_y${rotate_yaw}_p${rotate_pitch}_px${pupil_x}_py${pupil_y}.png`;
+      const rotate_yaw = round(-rotateBound + xNorm * rotateBound * 2);
+      const rotate_pitch = round(-rotateBound + yNorm * rotateBound * 2);
+      const pupil_x = round(-pupilBound + xNorm * pupilBound * 2);
+      const pupil_y = round(-pupilBound + yNorm * pupilBound * 2);
+
+      const filename = `${prefix}_y${rotate_yaw}_p${rotate_pitch}_px${pupil_x}_py${pupil_y}.png`;
 
       row.push({
         filename,
@@ -63,8 +59,8 @@ export function generateSteps(options: GenerateStepsOptions) {
         rotate_pitch,
         pupil_x,
         pupil_y,
-        crop_factor: 1.7,
-        output_quality: 100,
+        crop_factor: DEFAULTS.CROP_FACTOR,
+        output_quality: DEFAULTS.OUTPUT_QUALITY,
         src_ratio: 1,
         sample_ratio: 1,
       });
@@ -72,14 +68,15 @@ export function generateSteps(options: GenerateStepsOptions) {
     steps.push(row);
   }
 
-  return {
-    steps,
-    PREFIX,
-    X_STEPS,
-    Y_STEPS,
-  };
+  return { steps, prefix, xSteps, ySteps };
 }
 
+/**
+ * Calculate estimated cost for generation
+ */
 export function calculateCost(xSteps: number, ySteps: number): number {
-  return xSteps * ySteps * 0.00098;
+  return xSteps * ySteps * COST_PER_IMAGE;
 }
+
+// Re-export Step type for convenience
+export type { Step } from "./types";

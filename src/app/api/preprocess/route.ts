@@ -1,103 +1,60 @@
 import { NextRequest, NextResponse } from "next/server";
-import Replicate from "replicate";
+import {
+  getReplicateClient,
+  toDataUri,
+  handleReplicateOutput,
+  MODELS,
+} from "@/lib/replicate";
+import type { PreprocessRequest, PreprocessResponse, ApiErrorResponse } from "@/lib/types";
 
 export const maxDuration = 120;
 
-// Nano Banana Pro - image generation model for creating 3D-style portraits
-const MODEL_ID = "google/nano-banana-pro";
+const BASE_STYLE =
+  "3D animated Pixar-style character, Disney Pixar animation style, smooth skin, big expressive eyes, soft lighting, front facing, looking directly at camera, neutral expression, centered on pure black background";
 
-function getReplicateClient() {
-  const token = process.env.REPLICATE_API_TOKEN;
-  if (!token) {
-    throw new Error("REPLICATE_API_TOKEN is not set");
+function buildPrompt(fullBody: boolean, stylePrompt?: string): string {
+  const customAddition = stylePrompt ? `, ${stylePrompt}` : "";
+
+  if (fullBody) {
+    return `Transform this person into a full body ${BASE_STYLE}. Show the complete body from head to feet, natural relaxed standing pose, arms at sides. Full body visible${customAddition}. Keep the same facial features and likeness but as a 3D animated cartoon character.`;
   }
-  return new Replicate({ auth: token });
+
+  return `Transform this person into a ${BASE_STYLE}${customAddition}. Keep the same facial features and likeness but as a 3D animated cartoon character.`;
 }
 
-interface PreprocessRequest {
-  imageBase64: string;
-}
-
-async function fetchImageBuffer(url: string): Promise<Buffer> {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch result: ${response.status}`);
-  }
-  const arrayBuffer = await response.arrayBuffer();
-  return Buffer.from(arrayBuffer);
-}
-
-export async function POST(request: NextRequest) {
+export async function POST(
+  request: NextRequest
+): Promise<NextResponse<PreprocessResponse | ApiErrorResponse>> {
   try {
     const body: PreprocessRequest = await request.json();
-    const { imageBase64 } = body;
+    const { imageBase64, fullBody = false, stylePrompt } = body;
 
     if (!imageBase64) {
-      return NextResponse.json(
-        { error: "No image provided" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "No image provided" }, { status: 400 });
     }
 
     const replicate = getReplicateClient();
+    const prompt = buildPrompt(fullBody, stylePrompt);
 
-    // Convert base64 to data URI
-    const imageDataUri = imageBase64.startsWith("data:")
-      ? imageBase64
-      : `data:image/png;base64,${imageBase64}`;
-
-    console.log("[Preprocess] Creating 3D front-facing portrait with Nano Banana Pro...");
-
-    // Use Nano Banana Pro to create a 3D animated Pixar-style character
-    const output = await replicate.run(MODEL_ID, {
+    const output = await replicate.run(MODELS.NANO_BANANA_PRO, {
       input: {
-        prompt: "Transform this person into a 3D animated Pixar-style character. Stylized 3D render, Disney Pixar animation style, smooth skin, big expressive eyes, soft lighting, front facing, looking directly at camera, neutral expression, centered on pure black background. Keep the same facial features and likeness but as a 3D animated cartoon character.",
-        image_input: [imageDataUri],
+        prompt,
+        image_input: [toDataUri(imageBase64)],
         resolution: "2K",
-        aspect_ratio: "1:1",
+        aspect_ratio: fullBody ? "9:16" : "1:1",
         output_format: "png",
         safety_filter_level: "block_only_high",
       },
     });
 
-    console.log("[Preprocess] Output:", typeof output);
-
-    // Handle output - Nano Banana Pro returns a FileOutput object with .url() method
-    let resultBuffer: Buffer;
-
-    if (output && typeof output === "object" && "url" in output && typeof output.url === "function") {
-      // FileOutput object
-      const url = output.url();
-      console.log("[Preprocess] Fetching from URL:", url);
-      resultBuffer = await fetchImageBuffer(url);
-    } else if (typeof output === "string") {
-      // Direct URL string
-      resultBuffer = await fetchImageBuffer(output);
-    } else if (Array.isArray(output) && output.length > 0) {
-      // Array of outputs
-      const item = output[0];
-      if (typeof item === "object" && "url" in item && typeof item.url === "function") {
-        resultBuffer = await fetchImageBuffer(item.url());
-      } else if (typeof item === "string") {
-        resultBuffer = await fetchImageBuffer(item);
-      } else {
-        throw new Error("Unexpected array item format");
-      }
-    } else {
-      console.error("[Preprocess] Unexpected output:", output);
-      throw new Error("Unexpected output format from model");
-    }
-
-    const resultBase64 = resultBuffer.toString("base64");
-
-    console.log("[Preprocess] Portrait generation complete, size:", resultBuffer.length);
+    const resultBuffer = await handleReplicateOutput(output);
 
     return NextResponse.json({
       success: true,
-      imageBase64: resultBase64,
+      imageBase64: resultBuffer.toString("base64"),
     });
   } catch (error) {
-    console.error("Preprocess error:", error);
+    console.error("[Preprocess] Error:", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Preprocessing failed" },
       { status: 500 }

@@ -43,11 +43,10 @@ export function ImageUpload({ onImageSelect, disabled }: ImageUploadProps) {
   return (
     <Card
       {...getRootProps()}
-      className={`cursor-pointer transition-colors ${
-        isDragActive ? "border-primary bg-primary/5" : "border-dashed"
-      } ${disabled ? "opacity-50 cursor-not-allowed" : ""}`}
+      className={`cursor-pointer transition-colors ${isDragActive ? "border-primary bg-primary/5" : "border-dashed"
+        } ${disabled ? "opacity-50 cursor-not-allowed" : ""}`}
     >
-      <CardContent className="flex items-center justify-center p-4 h-[100px]">
+      <CardContent className="flex items-center justify-center p-4 h-[95px]">
         <input {...getInputProps()} />
         {preview ? (
           <div className="flex items-center gap-3">

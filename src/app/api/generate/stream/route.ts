@@ -1,19 +1,30 @@
 import { NextRequest } from "next/server";
 import { generateImage } from "@/lib/replicate";
-import { generateSteps, calculateCost } from "@/lib/constants";
+import { generateSteps, calculateCost, DEFAULTS } from "@/lib/constants";
+import type { GenerateStreamRequest } from "@/lib/types";
 
-export const maxDuration = 300; // 5 minutes max for generation
+export const maxDuration = 300;
 
-interface GenerateRequest {
-  imageBase64: string;
-  xSteps?: number;
-  ySteps?: number;
-  prefix?: string;
+const CONCURRENCY = 8;
+const MAX_RETRIES = 5;
+const INITIAL_BACKOFF_MS = 5000;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function POST(request: NextRequest) {
-  const body: GenerateRequest = await request.json();
-  const { imageBase64, xSteps = 5, ySteps = 5, prefix = "avatar" } = body;
+function encodeSSE(data: Record<string, unknown>): Uint8Array {
+  return new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+export async function POST(request: NextRequest): Promise<Response> {
+  const body: GenerateStreamRequest = await request.json();
+  const {
+    imageBase64,
+    xSteps = DEFAULTS.X_STEPS,
+    ySteps = DEFAULTS.Y_STEPS,
+    prefix = "avatar",
+  } = body;
 
   if (!imageBase64) {
     return new Response(JSON.stringify({ error: "No image provided" }), {
@@ -29,124 +40,87 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const { steps } = generateSteps({
-    X_STEPS: xSteps,
-    Y_STEPS: ySteps,
-    PREFIX: prefix,
-  });
-
+  const { steps } = generateSteps({ xSteps, ySteps, prefix });
   const totalImages = xSteps * ySteps;
   const cost = calculateCost(xSteps, ySteps);
   const flatSteps = steps.flat();
 
-  const encoder = new TextEncoder();
-
   const stream = new ReadableStream({
     async start(controller) {
-      // Send initial config
       controller.enqueue(
-        encoder.encode(
-          `data: ${JSON.stringify({
-            type: "config",
-            config: { xSteps, ySteps, prefix, totalImages, estimatedCost: cost },
-          })}\n\n`
-        )
+        encodeSSE({
+          type: "config",
+          config: { xSteps, ySteps, prefix, totalImages, estimatedCost: cost },
+        })
       );
 
-      try {
-        // Process images in parallel with controlled concurrency
-        const CONCURRENCY = 8;
-        let completedCount = 0;
-        let currentIndex = 0;
-        const results: { index: number; step: typeof flatSteps[0]; imageBase64: string }[] = [];
+      let completedCount = 0;
+      let currentIndex = 0;
 
-        // Helper to delay execution
-        const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+      const processNext = async (): Promise<void> => {
+        while (currentIndex < flatSteps.length) {
+          const myIndex = currentIndex++;
+          const step = flatSteps[myIndex];
+          let retries = 0;
 
-        // Worker function that processes images from the queue with retry
-        const processNext = async (): Promise<void> => {
-          while (currentIndex < flatSteps.length) {
-            const myIndex = currentIndex++;
-            const step = flatSteps[myIndex];
+          while (retries < MAX_RETRIES) {
+            try {
+              const imageBuffer = await generateImage({
+                imageBase64,
+                rotate_yaw: step.rotate_yaw,
+                rotate_pitch: step.rotate_pitch,
+                pupil_x: step.pupil_x,
+                pupil_y: step.pupil_y,
+                crop_factor: step.crop_factor,
+                output_quality: step.output_quality,
+                src_ratio: step.src_ratio,
+                sample_ratio: step.sample_ratio,
+              });
 
-            let retries = 0;
-            const maxRetries = 5;
-
-            while (retries < maxRetries) {
-              try {
-                const imageBuffer = await generateImage({
-                  imageBase64,
-                  rotate_yaw: step.rotate_yaw,
-                  rotate_pitch: step.rotate_pitch,
-                  pupil_x: step.pupil_x,
-                  pupil_y: step.pupil_y,
-                  crop_factor: step.crop_factor,
-                  output_quality: step.output_quality,
-                  src_ratio: step.src_ratio,
-                  sample_ratio: step.sample_ratio,
-                });
-
-                const resultBase64 = imageBuffer.toString("base64");
-                completedCount++;
-
-                // Store result for ordered output
-                results.push({ index: myIndex, step, imageBase64: resultBase64 });
-
-                // Send progress update immediately
-                controller.enqueue(
-                  encoder.encode(
-                    `data: ${JSON.stringify({
-                      type: "progress",
-                      completed: completedCount,
-                      total: totalImages,
-                      index: myIndex,
-                      step,
-                      imageBase64: resultBase64,
-                    })}\n\n`
-                  )
+              completedCount++;
+              controller.enqueue(
+                encodeSSE({
+                  type: "progress",
+                  completed: completedCount,
+                  total: totalImages,
+                  index: myIndex,
+                  step,
+                  imageBase64: imageBuffer.toString("base64"),
+                })
+              );
+              break;
+            } catch (err) {
+              const is429 = err instanceof Error && err.message.includes("429");
+              if (is429 && retries < MAX_RETRIES - 1) {
+                const waitTime = Math.min(
+                  INITIAL_BACKOFF_MS * Math.pow(2, retries),
+                  60000
                 );
-                break; // Success, exit retry loop
-              } catch (err) {
-                const is429 = err instanceof Error && err.message.includes("429");
-                if (is429 && retries < maxRetries - 1) {
-                  // Exponential backoff: 5s, 10s, 20s, 40s
-                  const waitTime = Math.min(5000 * Math.pow(2, retries), 60000);
-                  console.log(`[Rate limit] Image ${myIndex} hit 429, retrying in ${waitTime}ms (attempt ${retries + 1})`);
-                  await delay(waitTime);
-                  retries++;
-                } else {
-                  console.error(`Error generating image ${myIndex}:`, err);
-                  completedCount++;
-                  break; // Give up on this image
-                }
+                await delay(waitTime);
+                retries++;
+              } else {
+                console.error(`[Stream] Error generating image ${myIndex}:`, err);
+                completedCount++;
+                break;
               }
             }
           }
-        };
+        }
+      };
 
-        // Start parallel workers - reduced to 4 to avoid rate limits
+      try {
         const workers = Array(Math.min(CONCURRENCY, flatSteps.length))
           .fill(null)
           .map(() => processNext());
 
         await Promise.all(workers);
-
-        // Send completion
-        controller.enqueue(
-          encoder.encode(
-            `data: ${JSON.stringify({
-              type: "complete",
-            })}\n\n`
-          )
-        );
+        controller.enqueue(encodeSSE({ type: "complete" }));
       } catch (error) {
         controller.enqueue(
-          encoder.encode(
-            `data: ${JSON.stringify({
-              type: "error",
-              error: error instanceof Error ? error.message : "Generation failed",
-            })}\n\n`
-          )
+          encodeSSE({
+            type: "error",
+            error: error instanceof Error ? error.message : "Generation failed",
+          })
         );
       }
 

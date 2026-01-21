@@ -3,13 +3,8 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import type { Step } from "@/lib/constants";
-
-interface GeneratedImage {
-  step: Step;
-  imageBase64: string;
-  depthBase64?: string;
-}
+import { Box, FileImage, Code, FileCode } from "lucide-react";
+import type { GeneratedImage } from "@/lib/types";
 
 interface ExportModalProps {
   images: GeneratedImage[];
@@ -17,6 +12,7 @@ interface ExportModalProps {
   ySteps: number;
   isOpen: boolean;
   onClose: () => void;
+  glbBase64?: string | null;
 }
 
 export function ExportModal({
@@ -25,13 +21,32 @@ export function ExportModal({
   ySteps,
   isOpen,
   onClose,
+  glbBase64,
 }: ExportModalProps) {
   const [exporting, setExporting] = useState(false);
 
   if (!isOpen) return null;
 
+  const downloadGlb = () => {
+    if (!glbBase64) return;
+    
+    const binaryString = atob(glbBase64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    const blob = new Blob([bytes], { type: "model/gltf-binary" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "avatar-3d.glb";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   const generateEmbedCode = () => {
-    // Generate a self-contained HTML file with all images embedded
     const imagesJson = JSON.stringify(
       images.map((img, index) => ({
         index,
@@ -78,18 +93,16 @@ export function ExportModal({
     const avatar = document.getElementById('avatar');
     const container = document.getElementById('container');
 
-    // Preload images
     const loadedImages = images.map(img => {
       const imgEl = new Image();
       imgEl.src = 'data:image/png;base64,' + img.base64;
       return imgEl;
     });
 
-    // Set initial image
     avatar.src = loadedImages[0].src;
 
     let lastUpdate = 0;
-    const throttleMs = 16; // ~60fps
+    const throttleMs = 16;
 
     container.addEventListener('mousemove', (e) => {
       const now = Date.now();
@@ -118,7 +131,6 @@ export function ExportModal({
 
 import { useState, useCallback } from "react";
 
-// Import your images (you'll need to save them as files)
 const IMAGES = [
 ${images.map((_, i) => `  "/avatar-frames/frame-${i}.png",`).join("\n")}
 ];
@@ -177,7 +189,6 @@ export function Avatar3D() {
   const downloadImages = async () => {
     setExporting(true);
     try {
-      // Create a zip-like structure using data URLs
       for (let i = 0; i < images.length; i++) {
         const image = images[i];
         const a = document.createElement("a");
@@ -186,7 +197,6 @@ export function Avatar3D() {
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
-        // Small delay to prevent browser blocking
         await new Promise((r) => setTimeout(r, 100));
       }
     } finally {
@@ -203,53 +213,95 @@ export function Avatar3D() {
       <Card className="w-full max-w-2xl max-h-[90vh] overflow-auto">
         <CardHeader>
           <CardTitle className="flex items-center justify-between">
-            <span>Export Your 3D Avatar</span>
+            <span>Export Your Avatar</span>
             <Button variant="ghost" size="sm" onClick={onClose}>
               Close
             </Button>
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-6">
-          <div className="space-y-2">
-            <h3 className="font-medium">Option 1: Standalone HTML File</h3>
-            <p className="text-sm text-muted-foreground">
-              Download a self-contained HTML file with all images embedded.
-              Perfect for quick demos or embedding in websites.
-            </p>
-            <Button onClick={downloadHtml} disabled={exporting}>
-              {exporting ? "Exporting..." : "Download HTML File"}
-            </Button>
-          </div>
-
-          <div className="space-y-2">
-            <h3 className="font-medium">Option 2: Download All Frames</h3>
-            <p className="text-sm text-muted-foreground">
-              Download all {images.length} image frames separately. Use these
-              with your own implementation or video editing software.
-            </p>
-            <Button onClick={downloadImages} variant="outline" disabled={exporting}>
-              {exporting ? "Downloading..." : `Download ${images.length} Images`}
-            </Button>
-          </div>
-
-          <div className="space-y-2">
-            <h3 className="font-medium">Option 3: React Component Code</h3>
-            <p className="text-sm text-muted-foreground">
-              Copy a React component that you can use in your Next.js/React
-              project. You&apos;ll need to save the frames as separate files.
-            </p>
-            <Button onClick={copyReactCode} variant="outline">
-              Copy React Code
-            </Button>
-          </div>
-
-          <div className="p-4 bg-muted rounded-lg">
-            <h4 className="font-medium text-sm mb-2">Generated Configuration</h4>
-            <div className="text-xs font-mono space-y-1">
-              <p>Grid: {xSteps} x {ySteps}</p>
-              <p>Total Frames: {images.length}</p>
+          {/* GLB Export - Show if 3D model exists */}
+          {glbBase64 && (
+            <div className="space-y-2 p-4 bg-primary/5 rounded-lg border border-primary/20">
+              <h3 className="font-medium flex items-center gap-2">
+                <Box className="h-4 w-4" />
+                3D Model (GLB)
+              </h3>
+              <p className="text-sm text-muted-foreground">
+                Download the actual 3D model file. Use in Blender, Unity, Unreal, 
+                or any 3D software. Can be embedded in websites with Three.js.
+              </p>
+              <Button onClick={downloadGlb}>
+                <Box className="h-4 w-4 mr-2" />
+                Download GLB File
+              </Button>
             </div>
-          </div>
+          )}
+
+          {/* Frame-based exports - Show if images exist */}
+          {images.length > 0 && (
+            <>
+              <div className="space-y-2">
+                <h3 className="font-medium flex items-center gap-2">
+                  <FileCode className="h-4 w-4" />
+                  Standalone HTML File
+                </h3>
+                <p className="text-sm text-muted-foreground">
+                  Download a self-contained HTML file with all images embedded.
+                  Perfect for quick demos or embedding in websites.
+                </p>
+                <Button onClick={downloadHtml} variant="outline" disabled={exporting}>
+                  {exporting ? "Exporting..." : "Download HTML File"}
+                </Button>
+              </div>
+
+              <div className="space-y-2">
+                <h3 className="font-medium flex items-center gap-2">
+                  <FileImage className="h-4 w-4" />
+                  Download All Frames
+                </h3>
+                <p className="text-sm text-muted-foreground">
+                  Download all {images.length} image frames separately. Use these
+                  with your own implementation or video editing software.
+                </p>
+                <Button onClick={downloadImages} variant="outline" disabled={exporting}>
+                  {exporting ? "Downloading..." : `Download ${images.length} Images`}
+                </Button>
+              </div>
+
+              <div className="space-y-2">
+                <h3 className="font-medium flex items-center gap-2">
+                  <Code className="h-4 w-4" />
+                  React Component Code
+                </h3>
+                <p className="text-sm text-muted-foreground">
+                  Copy a React component that you can use in your Next.js/React
+                  project. You&apos;ll need to save the frames as separate files.
+                </p>
+                <Button onClick={copyReactCode} variant="outline">
+                  Copy React Code
+                </Button>
+              </div>
+
+              <div className="p-4 bg-muted rounded-lg">
+                <h4 className="font-medium text-sm mb-2">Generated Configuration</h4>
+                <div className="text-xs font-mono space-y-1">
+                  <p>Grid: {xSteps} x {ySteps}</p>
+                  <p>Total Frames: {images.length}</p>
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* Show message if only GLB and no frames */}
+          {glbBase64 && images.length === 0 && (
+            <div className="p-4 bg-muted rounded-lg">
+              <p className="text-sm text-muted-foreground">
+                Your 3D model is ready to download. Import it into any 3D software
+                or use Three.js to display it on the web.
+              </p>
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>
