@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useSyncExternalStore } from "react";
+import { useState, useCallback, useReducer } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import {
@@ -16,37 +16,41 @@ interface RenderHistoryProps {
   refreshTrigger?: number;
 }
 
-// Subscribe function for useSyncExternalStore
-const emptySubscribe = () => () => {};
+// Custom hook to get renders with force update capability
+function useRenders(refreshTrigger?: number) {
+  // Use reducer to force re-renders
+  const [, forceUpdate] = useReducer((x) => x + 1, 0);
+
+  // Read directly from localStorage on each render
+  // This is safe because it's a synchronous read during render
+  const renders = typeof window !== "undefined" ? getSavedRenders() : [];
+
+  // Force re-render when refreshTrigger changes (tracked via closure)
+  void refreshTrigger;
+
+  return { renders, forceUpdate };
+}
 
 export function RenderHistory({ onLoadRender, refreshTrigger }: RenderHistoryProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [version, setVersion] = useState(0);
+  const { renders, forceUpdate } = useRenders(refreshTrigger);
 
-  // Use useSyncExternalStore to read from localStorage without triggering the lint error
-  const renders = useSyncExternalStore(
-    emptySubscribe,
-    () => getSavedRenders(),
-    () => [] // Server snapshot
-  );
-
-  // Force re-read when refreshTrigger or version changes
-  useEffect(() => {
-    // This effect just triggers a re-render when needed
-  }, [refreshTrigger, version]);
+  const refresh = useCallback(() => {
+    forceUpdate();
+  }, [forceUpdate]);
 
   const handleDelete = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     deleteRender(id);
-    setVersion((v) => v + 1); // Trigger re-render
+    refresh();
     if (selectedId === id) setSelectedId(null);
   };
 
   const handleClearAll = () => {
     if (confirm("Delete all saved renders? This cannot be undone.")) {
       clearAllRenders();
-      setVersion((v) => v + 1); // Trigger re-render
+      refresh();
       setSelectedId(null);
     }
   };
